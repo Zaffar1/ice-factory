@@ -218,11 +218,27 @@ function applyMongooseCompat(modelClass) {
   };
 
   const originalCreate = modelClass.create;
-  modelClass.create = function (data, options) {
-    if (Array.isArray(data)) {
-      return this.bulkCreate(data, { individualHooks: true, ...options });
+  const originalBulkCreate = modelClass.bulkCreate;
+  
+  const mapData = (item) => {
+    if (!item) return item;
+    const mapped = { ...item };
+    if (mapped.customer !== undefined) {
+      mapped.customerId = mapped.customer;
+      delete mapped.customer;
     }
-    return originalCreate.call(this, data, options);
+    return mapped;
+  };
+
+  modelClass.create = async function (data, options) {
+    if (Array.isArray(data)) {
+      const results = [];
+      for (const item of data) {
+        results.push(await originalCreate.call(this, mapData(item), options));
+      }
+      return results;
+    }
+    return originalCreate.call(this, mapData(data), options);
   };
 
   // ── Mongoose-style Instance Methods & Property Aliases ─────────────────────
@@ -269,14 +285,18 @@ function applyMongooseCompat(modelClass) {
     const values = this.get({ plain: true });
     values._id = values.id;
 
-    if (values.customerAssociation !== undefined) {
-      values.customer = values.customerAssociation;
-      delete values.customerAssociation;
-      delete values.customerId;
-    } else if (values.customerId !== undefined) {
-      values.customer = values.customerId;
-      delete values.customerAssociation;
-      delete values.customerId;
+    // Only remap customerId -> customer if this is NOT the Customer model itself.
+    // On Order/Payment, customerId is a foreign key. On Customer, it's the custom string ID.
+    if (this.constructor.name !== 'Customer') {
+      if (values.customerAssociation !== undefined) {
+        values.customer = values.customerAssociation;
+        delete values.customerAssociation;
+        delete values.customerId;
+      } else if (values.customerId !== undefined) {
+        values.customer = values.customerId;
+        delete values.customerAssociation;
+        delete values.customerId;
+      }
     }
 
     return values;

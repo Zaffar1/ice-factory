@@ -53,7 +53,7 @@ exports.getOrders = async (req, res, next) => {
 
     const total = await Order.countDocuments(query);
     const orders = await Order.find(query)
-      .populate('customer', 'name customerId phone type')
+      .populate('customer', 'id name customerId phone type')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limitNum);
@@ -119,7 +119,8 @@ exports.createOrder = async (req, res, next) => {
     }
 
     // Create the order (Mongoose pre-validate hook computes order.amount)
-    const order = new Order(req.body);
+    const orderData = { ...req.body, customerId: customerId };
+    const order = new Order(orderData);
     await order.save();
 
     // Calculate customer balance adjustment
@@ -156,37 +157,43 @@ exports.updateOrder = async (req, res, next) => {
       });
     }
 
+    // Safely get old customer ID as string
+    const oldCustomerId = oldOrder.customer ? oldOrder.customer.toString() : null;
+    
     // Validate new customer if customer is changing
-    const newCustomerId = req.body.customer || oldOrder.customer.toString();
-    const newCustomer = await Customer.findById(newCustomerId);
-    if (!newCustomer) {
-      return res.status(404).json({
-        success: false,
-        message: 'Assigned customer not found'
-      });
+    const newCustomerId = req.body.customer || oldCustomerId;
+    
+    // Only check if there's a new customer ID (in case both are null)
+    let newCustomer = null;
+    if (newCustomerId) {
+      newCustomer = await Customer.findById(newCustomerId);
+      if (!newCustomer) {
+        return res.status(404).json({
+          success: false,
+          message: 'Assigned customer not found'
+        });
+      }
     }
 
-    // Update fields & recalculate amount before saving
-    // We temporary update a virtual mongoose instance to run validate & calculate amount
-    const tempOrder = new Order({ ...oldOrder.toObject(), ...req.body });
-    // Run pre-validate explicitly to update tempOrder.amount
-    if (tempOrder.qty && tempOrder.rate) {
-      tempOrder.amount = tempOrder.qty * tempOrder.rate;
-    }
+    // Build the updated order data to recalculate amount if qty/rate changed
+    const updatedData = { ...req.body, customerId: newCustomerId };
+    updatedData.customer = newCustomerId; // Ensure fallback is used if req.body.customer was empty
+    const newQty = updatedData.qty !== undefined ? updatedData.qty : oldOrder.qty;
+    const newRate = updatedData.rate !== undefined ? updatedData.rate : oldOrder.rate;
+    updatedData.amount = newQty * newRate;
 
-    // Calculate old & new effects
+    // Calculate old & new effects using a plain object
+    const tempOrder = { ...oldOrder.toObject(), ...updatedData };
     const oldEffect = getOrderBalanceEffect(oldOrder);
     const newEffect = getOrderBalanceEffect(tempOrder);
 
     // Save actual changes
-    const updatedOrder = await Order.findByIdAndUpdate(
-      req.params.id,
-      { ...req.body, amount: tempOrder.amount },
-      { new: true, runValidators: true }
-    ).populate('customer', 'name');
+    await Order.findByIdAndUpdate(req.params.id, updatedData, { runValidators: true });
+    const updatedOrder = await Order.findById(req.params.id).populate('customer', 'name');
 
-    // Adjust balances
-    const customerChanged = oldOrder.customer.toString() !== newCustomerId;
+    // Adjust balances safely
+    const newCustomerIdStr = newCustomerId ? newCustomerId.toString() : null;
+    const customerChanged = oldCustomerId !== newCustomerIdStr;
 
     if (customerChanged) {
       // Revert old effect from old customer
@@ -196,14 +203,14 @@ exports.updateOrder = async (req, res, next) => {
         await oldCustomer.save();
       }
       // Apply new effect to new customer
-      if (newEffect > 0) {
+      if (newEffect > 0 && newCustomer) {
         newCustomer.balance += newEffect;
         await newCustomer.save();
       }
     } else {
       // Adjust balance of the same customer by the difference
       const diff = newEffect - oldEffect;
-      if (diff !== 0) {
+      if (diff !== 0 && newCustomer) {
         newCustomer.balance += diff;
         await newCustomer.save();
       }

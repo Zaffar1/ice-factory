@@ -30,7 +30,7 @@ const seedData = async () => {
       console.log('🚀 [Seeder] Empty database detected. Initializing factory demo dataset...');
 
       // Clear sequential ID tracker counters to avoid prefix offsets
-      await Counter.deleteMany({});
+      await Counter.destroy({ truncate: true });
 
       // Seed Customers
       const customers = await Customer.create([

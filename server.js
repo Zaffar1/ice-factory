@@ -74,7 +74,8 @@ app.use((req, res, next) => {
 // Inject Global Error interceptor
 app.use(errorHandler);
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
   console.log(`🚀 Server successfully launched on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode.`);
 });
+

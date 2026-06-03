@@ -76,7 +76,7 @@ exports.getDashboardStats = async (req, res, next) => {
       }
     }) || 0;
 
-    const dailyProduction = parseFloat(produced) - parseFloat(damaged);
+    const dailyProduction = (parseFloat(produced) || 0) - (parseFloat(damaged) || 0);
 
     // 4. Pending Payments: sum of positive outstanding customer balances
     const pendingPayments = await Customer.sum('balance', {
@@ -92,7 +92,7 @@ exports.getDashboardStats = async (req, res, next) => {
       limit: 5,
       include: [{
         model: Customer,
-        as: 'customer',
+        as: 'customerAssociation',
         attributes: ['name', 'customerId']
       }]
     });
@@ -102,15 +102,25 @@ exports.getDashboardStats = async (req, res, next) => {
       where: Sequelize.literal('qty < minQty')
     });
 
+    // 7. Total Expenses: sum of all expenses in range
+    const totalExpenses = await Expense.sum('amount', {
+      where: dateFilter
+    }) || 0;
+
+    // 8. Total Profit: Revenue - Expenses
+    const totalProfit = (parseFloat(totalRevenue) || 0) - (parseFloat(totalExpenses) || 0);
+
     res.status(200).json({
       success: true,
       data: {
-        totalRevenue: parseFloat(totalRevenue),
-        totalOrders,
-        dailyProduction,
-        pendingPayments: parseFloat(pendingPayments),
+        totalRevenue: parseFloat(totalRevenue) || 0,
+        totalOrders: totalOrders || 0,
+        dailyProduction: dailyProduction || 0,
+        pendingPayments: parseFloat(pendingPayments) || 0,
         recentOrders,
-        lowStockAlerts
+        lowStockAlerts,
+        totalExpenses: parseFloat(totalExpenses) || 0,
+        totalProfit: totalProfit || 0
       }
     });
   } catch (error) {
