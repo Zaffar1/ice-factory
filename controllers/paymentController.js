@@ -36,16 +36,40 @@ exports.getPayments = async (req, res, next) => {
 
     const total = await Payment.countDocuments(query);
     const payments = await Payment.find(query)
-      .populate('customer', 'name customerId phone type')
+      .populate('customer', 'name customerId phone type balance')
       .sort({ date: -1, createdAt: -1 })
       .skip(skip)
       .limit(limitNum);
 
     const pages = Math.ceil(total / limitNum);
 
+    // Calculate total collection and today's collection across all records
+    const allPaymentsForStats = await Payment.find({});
+    const totalCollection = allPaymentsForStats.reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
+
+    // Get start of today in local time
+    const today = new Date();
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const dd = String(today.getDate()).padStart(2, '0');
+    const todayStr = `${yyyy}-${mm}-${dd}`;
+
+    const todayCollection = allPaymentsForStats
+      .filter(p => {
+        if (!p.date) return false;
+        const d = new Date(p.date);
+        const dy = d.getFullYear();
+        const dm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        return `${dy}-${dm}-${dd}` === todayStr;
+      })
+      .reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
+
     res.status(200).json({
       success: true,
       data: payments,
+      totalCollection,
+      todayCollection,
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -92,7 +116,7 @@ exports.createPayment = async (req, res, next) => {
     await customer.save();
 
     // Fetch saved payment with populated customer name
-    const populatedPayment = await Payment.findById(payment._id).populate('customer', 'name');
+    const populatedPayment = await Payment.findById(payment._id).populate('customer', 'name customerId phone type balance');
 
     res.status(201).json({
       success: true,

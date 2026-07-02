@@ -1,5 +1,7 @@
 const Order = require('../models/Order');
 const Customer = require('../models/Customer');
+const Inventory = require('../models/Inventory');
+const Payment = require('../models/Payment');
 
 /**
  * Helper to calculate the impact of an order on a customer's balance.
@@ -7,11 +9,65 @@ const Customer = require('../models/Customer');
  */
 const getOrderBalanceEffect = (order) => {
   if (!order) return 0;
-  
+
   const isPendingOrCredit = ['Pending', 'Credit'].includes(order.payment);
   const isNotCancelled = order.status !== 'Cancelled';
-  
+
   return (isPendingOrCredit && isNotCancelled) ? order.amount : 0;
+};
+
+/**
+ * Helper to calculate the inventory decrement effect of an order
+ */
+const getOrderInventoryEffect = (order) => {
+  if (!order || order.status !== 'Delivered') return 0;
+  return order.qty;
+};
+
+/**
+ * Helper to adjust inventory quantity for finished goods
+ */
+const adjustFinishedGoodsInventory = async (itemType, qtyChange) => {
+  if (qtyChange === 0) return;
+
+  const invItem = await Inventory.findOne({
+    item: itemType,
+    category: 'Finished Goods'
+  });
+
+  if (invItem) {
+    invItem.qty = Math.max(0, invItem.qty + qtyChange);
+    await invItem.save();
+  }
+};
+
+/**
+ * Helper to synchronize order paid status with collections receipts
+ */
+const syncOrderPaymentReceipt = async (order) => {
+  if (!order) return;
+
+  const orderId = order.orderId;
+  const isPaid = order.payment === 'Paid';
+  const isDelivered = order.status === 'Delivered';
+
+  if (isPaid && isDelivered) {
+    const existingPayment = await Payment.findOne({ note: `Auto-generated payment for Order #${orderId}` });
+    if (!existingPayment) {
+      await Payment.create({
+        customer: order.customer,
+        amount: order.amount,
+        method: 'Cash',
+        date: order.date || new Date(),
+        note: `Auto-generated payment for Order #${orderId}`
+      });
+    }
+  } else {
+    const existingPayment = await Payment.findOne({ note: `Auto-generated payment for Order #${orderId}` });
+    if (existingPayment) {
+      await existingPayment.deleteOne();
+    }
+  }
 };
 
 /**
@@ -130,6 +186,15 @@ exports.createOrder = async (req, res, next) => {
       await customer.save();
     }
 
+    // Deduct quantity from finished goods inventory if order is delivered
+    const stockEffect = getOrderInventoryEffect(order);
+    if (stockEffect > 0) {
+      await adjustFinishedGoodsInventory(order.type, -stockEffect);
+    }
+
+    // Sync collections payment receipt if order is Paid and Delivered
+    await syncOrderPaymentReceipt(order);
+
     // Fetch full saved order with populated customer details
     const populatedOrder = await Order.findById(order._id).populate('customer', 'name');
 
@@ -157,12 +222,20 @@ exports.updateOrder = async (req, res, next) => {
       });
     }
 
+    // Block editing if the order is already Delivered
+    if (oldOrder.status === 'Delivered') {
+      return res.status(400).json({
+        success: false,
+        message: 'Delivered orders cannot be modified'
+      });
+    }
+
     // Safely get old customer ID as string
     const oldCustomerId = oldOrder.customer ? oldOrder.customer.toString() : null;
-    
+
     // Validate new customer if customer is changing
     const newCustomerId = req.body.customer || oldCustomerId;
-    
+
     // Only check if there's a new customer ID (in case both are null)
     let newCustomer = null;
     if (newCustomerId) {
@@ -191,6 +264,25 @@ exports.updateOrder = async (req, res, next) => {
     await Order.findByIdAndUpdate(req.params.id, updatedData, { runValidators: true });
     const updatedOrder = await Order.findById(req.params.id).populate('customer', 'name');
 
+    // Adjust finished goods inventory dynamically
+    const oldStockEffect = getOrderInventoryEffect(oldOrder);
+    const newStockEffect = getOrderInventoryEffect(tempOrder);
+    const typeChanged = oldOrder.type !== tempOrder.type;
+
+    if (typeChanged) {
+      if (oldStockEffect > 0) {
+        await adjustFinishedGoodsInventory(oldOrder.type, oldStockEffect);
+      }
+      if (newStockEffect > 0) {
+        await adjustFinishedGoodsInventory(tempOrder.type, -newStockEffect);
+      }
+    } else {
+      const stockDiff = newStockEffect - oldStockEffect;
+      if (stockDiff !== 0) {
+        await adjustFinishedGoodsInventory(oldOrder.type, -stockDiff);
+      }
+    }
+
     // Adjust balances safely
     const newCustomerIdStr = newCustomerId ? newCustomerId.toString() : null;
     const customerChanged = oldCustomerId !== newCustomerIdStr;
@@ -215,6 +307,9 @@ exports.updateOrder = async (req, res, next) => {
         await newCustomer.save();
       }
     }
+
+    // Sync collections payment receipt if order is Paid and Delivered
+    await syncOrderPaymentReceipt(updatedOrder);
 
     res.status(200).json({
       success: true,
@@ -248,6 +343,18 @@ exports.deleteOrder = async (req, res, next) => {
         customer.balance -= effect;
         await customer.save();
       }
+    }
+
+    // Restore finished goods stock back to inventory if order was delivered
+    const stockEffect = getOrderInventoryEffect(order);
+    if (stockEffect > 0) {
+      await adjustFinishedGoodsInventory(order.type, stockEffect);
+    }
+
+    // Clean up any auto-generated payment receipt
+    const existingPayment = await Payment.findOne({ note: `Auto-generated payment for Order #${order.orderId}` });
+    if (existingPayment) {
+      await existingPayment.deleteOne();
     }
 
     await order.deleteOne();
